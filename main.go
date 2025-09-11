@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log"
@@ -24,11 +25,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
-const Version = "v0.0.1"
+// Version is the version of gs-init tool.
+const Version = "v0.0.2"
+
+func init() {
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.Ltime)
+}
 
 func main() {
 	var (
@@ -55,7 +63,7 @@ func main() {
 		}
 
 		if module == "" {
-			log.Fatalln("module name is required")
+			log.Fatalln("[ERROR] module name is required")
 		}
 
 		// Extract project name from module path
@@ -65,25 +73,25 @@ func main() {
 		// Check if project directory already exists
 		if _, err := os.Stat(projectName); err != nil {
 			if !os.IsNotExist(err) {
-				log.Fatalln(err)
+				log.Fatalf("[ERROR] Stat directory %s failed: %v", projectName, err)
 			}
 		} else {
-			log.Fatalln("project already exists")
+			log.Fatalf("[ERROR] Directory %s already exists", projectName)
 		}
-
-		// Clone the skeleton repository
-		srcDir := gitClone(branch)
-		fmt.Println(srcDir)
 
 		// Convert project name to PascalCase for Go package naming
 		pkgName := toPascal(projectName)
+
+		// Clone the skeleton repository
+		srcDir := gitClone(branch)
 		replaceFiles(srcDir, module, pkgName)
 
 		// Rename project directory
 		if err := os.Rename(srcDir, projectName); err != nil {
-			log.Fatalln(err)
+			log.Fatalf("[ERROR] Rename directory %s to %s failed: %v", srcDir, projectName, err)
 		}
 
+		runGen(projectName)
 		return nil
 	}
 
@@ -96,9 +104,9 @@ func main() {
 func gitClone(branch string) string {
 	tempDir, err := os.MkdirTemp(os.TempDir(), "")
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalf("[ERROR] Create temp directory failed: %v", err)
 	}
-	log.Println(tempDir) // log temp directory path
+	log.Println("[INFO] ", tempDir) // log temp directory path
 
 	// Execute git clone
 	cmd := exec.Command(
@@ -109,21 +117,21 @@ func gitClone(branch string) string {
 		"--branch",
 		branch,
 		"--single-branch",
+		"--progress",
 		"https://github.com/go-spring/skeleton.git",
 	)
 	cmd.Dir = tempDir
 	cmd.Env = os.Environ()
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Fatalln(err, string(b))
+	if err = runCommand(cmd); err != nil {
+		log.Fatalf("[ERROR] Git clone failed: %v", err)
 	}
-	log.Println(string(b)) // output git clone result
+	log.Println("[INFO] Git clone completed successfully")
 
 	// Remove .git folder to detach from skeleton repo
 	projectDir := filepath.Join(tempDir, "skeleton")
 	gitDir := filepath.Join(projectDir, ".git")
 	if err = os.RemoveAll(gitDir); err != nil {
-		log.Fatalln(err)
+		log.Fatalf("[ERROR] Remove .git directory failed: %v", err)
 	}
 	return projectDir
 }
@@ -152,7 +160,7 @@ func toPascal(s string) string {
 func replaceFiles(dir string, module, pkgName string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalf("[ERROR] Read directory %s failed: %v", dir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -163,7 +171,7 @@ func replaceFiles(dir string, module, pkgName string) {
 		fileName := filepath.Join(dir, e.Name())
 		b, err := os.ReadFile(fileName)
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalf("[ERROR] Read file %s failed: %v", fileName, err)
 		}
 
 		// Replace placeholders in file content
@@ -172,13 +180,57 @@ func replaceFiles(dir string, module, pkgName string) {
 
 		// Remove original file (preparing to rename if necessary)
 		if err = os.Remove(fileName); err != nil {
-			log.Fatalln(err)
+			log.Fatalf("[ERROR] Remove file %s failed: %v", fileName, err)
 		}
 
 		// Write updated content to file
 		fileName = strings.ReplaceAll(fileName, "GS_PROJECT_NAME", pkgName)
 		if err = os.WriteFile(fileName, b, os.ModePerm); err != nil {
-			log.Fatalln(err)
+			log.Fatalf("[ERROR] Write file %s failed: %v", fileName, err)
 		}
 	}
+}
+
+// runGen runs `gs gen` command.
+func runGen(dir string) {
+	cmd := exec.Command("gs", "gen")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	if err := runCommand(cmd); err != nil {
+		log.Fatalf("[ERROR] Run `gs gen` failed: %v", err)
+	}
+	log.Println("[INFO] Run `gs gen` completed successfully")
+}
+
+// runCommand runs a command and prints its output to stdout.
+func runCommand(cmd *exec.Cmd) error {
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		log.Fatalf("[ERROR] Create pipe error: %v", err)
+	}
+
+	go func() {
+		defer func() { _ = r.Close() }()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			s := scanner.Text()
+			if strings.TrimSpace(s) == "" {
+				continue
+			}
+			fmt.Println(s)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Fatalf("[ERROR] Scan pipe error: %v", err)
+		}
+	}()
+
+	defer func() {
+		time.Sleep(time.Millisecond * 100)
+		_ = w.Close()
+	}()
+
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
 }
