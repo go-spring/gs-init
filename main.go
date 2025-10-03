@@ -31,7 +31,7 @@ import (
 )
 
 // Version is the version of gs-init tool.
-const Version = "v0.0.2"
+const Version = "v0.0.3"
 
 func init() {
 	log.SetOutput(os.Stdout)
